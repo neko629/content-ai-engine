@@ -1,0 +1,4 @@
+# content-ai-engine 参考实现核心为零第三方依赖（Python 3.10+ 标准库）。
+# 接入真实 OpenAI 兼容端点（LLM_BASE_URL / LLM_API_KEY）无需任何额外依赖。
+#
+# 可选（仅本地开发）：运行标准库单测无需安装；若要用 pytest 等，自行 pip 安装即可。

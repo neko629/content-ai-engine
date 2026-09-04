@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>content-ai-engine · AI 内容加工链 demo</title>
+<style>
+  :root { --bg:#0f1117; --card:#181c27; --line:#2a3040; --tx:#e8ecf4; --mut:#9aa4b8;
+          --acc:#6d8dff; --ok:#3fb97f; --bad:#e55c6c; --warn:#e0a53a; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background:var(--bg); color:var(--tx); }
+  header { padding:22px 28px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0 0 4px; font-size:20px; }
+  header p { margin:0; color:var(--mut); font-size:13px; }
+  main { display:grid; grid-template-columns: 340px 1fr; gap:18px; padding:18px 28px; }
+  @media (max-width:900px){ main{grid-template-columns:1fr;} }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .panel h2 { margin:0 0 12px; font-size:14px; color:var(--mut); font-weight:600; }
+  label { display:block; margin:10px 0 4px; font-size:13px; color:var(--mut); }
+  input, textarea { width:100%; padding:9px 10px; border-radius:8px; border:1px solid var(--line);
+      background:#0e1119; color:var(--tx); font:inherit; }
+  textarea { min-height:64px; resize:vertical; }
+  button { margin:14px 8px 0 0; padding:8px 14px; border-radius:8px; border:none; cursor:pointer;
+      font:inherit; font-weight:600; }
+  .primary { background:var(--acc); color:#fff; }
+  .ghost { background:transparent; color:var(--mut); border:1px solid var(--line); }
+  .hint { margin-top:10px; font-size:12px; color:var(--mut); }
+  .badge { display:inline-block; padding:1px 8px; border-radius:20px; font-size:12px; margin-left:6px; }
+  .b-ok{background:rgba(63,185,127,.16);color:var(--ok);} .b-bad{background:rgba(229,92,108,.16);color:var(--bad);}
+  .b-warn{background:rgba(224,165,58,.16);color:var(--warn);}
+  .steps { list-style:none; margin:0; padding:0; }
+  .steps li { display:flex; gap:10px; padding:8px 0; border-bottom:1px dashed var(--line); font-size:13px; }
+  .dot { width:9px; height:9px; border-radius:50%; margin-top:6px; flex:none; }
+  .card { margin-top:12px; }
+  .card img { max-width:100%; border-radius:8px; border:1px solid var(--line); display:block; }
+  pre { background:#0e1119; border:1px solid var(--line); border-radius:8px; padding:10px;
+        overflow:auto; font-size:12px; white-space:pre-wrap; word-break:break-all; }
+  .mut { color:var(--mut); } .small{ font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>content-ai-engine · 参考实现 demo</h1>
+  <p>一条内容从裸标题到「审核通过 + AI 标题 + AI 封面」的加工链。默认 Mock 模型离线演示，可看到降级路径；配 <code>LLM_BASE_URL / LLM_API_KEY</code> 即切真实模型。</p>
+</header>
+<main>
+  <section>
+    <div class="panel">
+      <h2>运行一条加工链</h2>
+      <label>标题（必填）</label>
+      <input id="title" value="雨夜逆袭：少年觉醒异能" placeholder="输入标题" />
+      <label>正文（可选，用于文本审核）</label>
+      <textarea id="text" placeholder="粘贴正文做 LLM 审核，留空则用标题审核"></textarea>
+      <button class="primary" onclick="runPipeline()">审核 + 标题 + 封面</button>
+      <button class="ghost" onclick="runStoryboard()">演示：脏 JSON → 容错解析</button>
+      <button class="ghost" onclick="runBatch()">批量示例(含空标题→skipped)</button>
+      <div class="hint">页面默认走 mock；演示"供应商失败自动降级"看右侧步骤里的 status=fallback。</div>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2>演示说明</h2>
+      <ul class="small mut" style="padding-left:18px">
+        <li><b>多模型网关</b>：候选按用途配置，逐个尝试、失败自动 fallback（mock 兜底）。</li>
+        <li><b>标题</b>：改写 → 强清洗污染/拒答检测 → 降温度重试。</li>
+        <li><b>封面</b>：标题 → LLM 扩写 SD 提示词(带缓存) → 文生图 → 完成回写。</li>
+        <li><b>审核</b>：LLM 四类判定 + <b>fail-open</b>（服务挂了不阻塞主线，标记 degraded）。</li>
+        <li><b>结构化输出</b>：脏 JSON → 容错解析 → 结构校验 → 带错误反馈重试。</li>
+      </ul>
+    </div>
+  </section>
+  <section>
+    <div class="panel" id="result"></div>
+  </section>
+</main>
+
+<script>
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return r.json();
+}
+function badge(s) {
+  if (s === "ok") return '<span class="badge b-ok">ok</span>';
+  if (s === "blocked") return '<span class="badge b-bad">blocked</span>';
+  if (s === "skipped") return '<span class="badge b-warn">skipped</span>';
+  if (s === "failed") return '<span class="badge b-bad">failed</span>';
+  if (s === "fallback") return '<span class="badge b-warn">fallback</span>';
+  if (s === true) return '<span class="badge b-ok">通过</span>';
+  if (s === false) return '<span class="badge b-bad">命中</span>';
+  return '';
+}
+const $ = (id) => document.getElementById(id);
+const statusOf = (r) => r.moderation ? (r.moderation.passed ? '通过' : '拦截') : '';
+
+function renderPipeline(r) {
+  const steps = (r.steps || []).map(s => {
+    const color = s.ok ? 'var(--ok)' : 'var(--bad)';
+    const deg = s.degraded ? ' <span class="badge b-warn">fail-open</span>' : '';
+    const prov = (s.detail && s.detail.meta && s.detail.meta.status)
+        ? ' ' + badge(s.detail.meta.status) : '';
+    return `<li><span class="dot" style="background:${color}"></span>
+      <div style="flex:1"><b>${s.name}</b>${deg}${prov}
+        <div class="mut small">${(s.detail && (s.detail.after || s.detail.sd_prompt || s.detail.reason)) || ''}</div>
+      </div></li>`;
+  }).join('');
+  $("result").innerHTML = `
+    <h2>结果 <span class="badge ${r.status==='ok'?'b-ok':r.status==='blocked'?'b-bad':'b-warn'}">${r.status}${r.title_changed?' · 标题已改写':''}</span>
+        <span class="mut small">${r.duration_ms}ms</span></h2>
+    ${r.moderation ? `<div class="mut small">文本审核：${statusOf(r)} ${r.moderation.degraded?badge('fail-open'):''} ${JSON.stringify(r.moderation.flags)}</div>` : ''}
+    ${r.title ? `<div class="small mut">原标题：${r.input_title}　→　AI 标题：<b>${r.title}</b></div>` : ''}
+    ${r.cover_data_uri ? `<div class="card"><img src="${r.cover_data_uri}" alt="cover" /></div>` : ''}
+    <ul class="steps">${steps}</ul>
+    <pre>${JSON.stringify(r, (k,v)=> k==='cover_data_uri'? '[image…]':v, 2)}</pre>`;
+}
+async function runPipeline() {
+  const r = await post("/api/pipeline", { title: $("title").value, text: $("text").value });
+  renderPipeline(r);
+}
+async function runBatch() {
+  const titles = ["雨夜逆袭：少年觉醒异能", "公司里最后一位实习生", "开局获得无字天书", ""];
+  const r = await post("/api/batch", { titles });
+  $("result").innerHTML = `
+    <h2>批量加工 <span class="mut small">${JSON.stringify(r.by_status)}</span></h2>
+    <ul class="steps">${r.results.map(x => `<li><span class="dot" style="background:${x.status==='ok'?'var(--ok)':x.status==='skipped'?'var(--warn)':'var(--bad)'}"></span>
+      <div style="flex:1">${badge(x.status)} <b>${x.input||'(空)'}</b>
+        ${x.title&&x.title!==x.input?`→ ${x.title}`:''}
+        <div class="mut small">${x.reason||x.moderation?.passed?'审核通过':'审核拦截'} · ${x.cover_status||''} · ${x.duration_ms}ms</div>
+      </div></li>`).join('')}</ul>`;
+}
+async function runStoryboard() {
+  const r = await post("/api/storyboard", { theme: $("title").value });
+  $("result").innerHTML = `
+    <h2>结构化输出演示 <span class="mut small">解析尝试 ${r.repair_meta.attempts} 次 · repaired=${r.repair_meta.repaired}</span></h2>
+    <p class="small mut">${r.explain}</p>
+    <pre>${JSON.stringify(r.data, null, 2)}</pre>`;
+}
+</script>
+</body>
+</html>

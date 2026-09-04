@@ -1,0 +1,29 @@
+{
+  "models": [
+    {
+      "name": "primary",
+      "provider": "openai_compatible",
+      "model": "gpt-4o-mini",
+      "base_url_env": "LLM_BASE_URL",
+      "api_key_env": "LLM_API_KEY",
+      "load_balance": true,
+      "is_default": false
+    },
+    {
+      "name": "fallback",
+      "provider": "mock",
+      "model": "mock-default",
+      "load_balance": false,
+      "is_default": true
+    }
+  ],
+  "purposes": {
+    "title": ["primary", "fallback"],
+    "moderation": ["primary", "fallback"],
+    "sd_prompt": ["primary", "fallback"],
+    "storyboard": ["primary", "fallback"]
+  },
+  "engine": {
+    "fail_open_on_llm_error": true
+  }
+}
